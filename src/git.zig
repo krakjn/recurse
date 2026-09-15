@@ -2,7 +2,7 @@ const std = @import("std");
 const c = @import("git2");
 const App = @import("app.zig").App;
 
-pub const GitError = error{ Git, OutOfMemory, Detached, Dirty, NotFastForward, Missing, Uncommitted, NoTty, Aborted, NothingToCommit };
+pub const GitError = error{ Git, OutOfMemory, Detached, Dirty, NotFastForward, Missing, Uncommitted, NoTty, Aborted, NothingToCommit, WouldDetach, Ahead };
 
 pub fn init() GitError!void {
     if (c.git_libgit2_init() < 0) return error.Git;
@@ -313,14 +313,109 @@ pub fn fetchRemote(repo: *c.git_repository, name: [*:0]const u8) GitError!void {
     try check(c.git_remote_fetch(remote, null, &opts, null));
 }
 
-pub fn syncSub(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocator) GitError!void {
+pub fn syncSub(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocator) GitError![]const u8 {
     const name_z = try arena.dupeZ(u8, name);
     var sm: ?*c.git_submodule = null;
     try check(c.git_submodule_lookup(&sm, repo, name_z));
     defer c.git_submodule_free(sm);
+
+    var branch_name: ?[]const u8 = null;
+    if (c.git_submodule_branch(sm)) |b| {
+        branch_name = try arena.dupe(u8, std.mem.span(b));
+    }
+
+    var existing: ?*c.git_repository = null;
+    if (c.git_submodule_open(&existing, sm) == 0) {
+        defer c.git_repository_free(existing);
+        if (branch_name == null and c.git_repository_head_detached(existing) == 0) {
+            var head_ref: ?*c.git_reference = null;
+            if (c.git_repository_head(&head_ref, existing) == 0) {
+                defer c.git_reference_free(head_ref);
+                branch_name = try arena.dupe(u8, std.mem.span(c.git_reference_shorthand(head_ref)));
+            }
+        }
+    }
+
     var opts = std.mem.zeroes(c.git_submodule_update_options);
     try check(c.git_submodule_update_options_init(&opts, c.GIT_SUBMODULE_UPDATE_OPTIONS_VERSION));
     try check(c.git_submodule_update(sm, 1, &opts));
+
+    var child: ?*c.git_repository = null;
+    try check(c.git_submodule_open(&child, sm));
+    defer c.git_repository_free(child);
+
+    const pin = c.git_submodule_wd_id(sm) orelse c.git_submodule_head_id(sm) orelse return error.Git;
+    const attached = try attachAtPin(child.?, pin, branch_name, arena);
+    return attached;
+}
+
+/// Point a local branch at `pin` and check it out. Never leaves HEAD detached.
+/// Fast-forwards the branch if the pin is ahead; refuses to rewind.
+fn attachAtPin(
+    repo: *c.git_repository,
+    pin: *const c.git_oid,
+    preferred: ?[]const u8,
+    arena: std.mem.Allocator,
+) GitError![]const u8 {
+    const name = preferred orelse (try findLocalBranchAt(repo, pin, arena)) orelse return error.WouldDetach;
+    const name_z = try arena.dupeZ(u8, name);
+    const refname_z = try std.fmt.allocPrintSentinel(arena, "refs/heads/{s}", .{name}, 0);
+
+    var commit: ?*c.git_commit = null;
+    try check(c.git_commit_lookup(&commit, repo, pin));
+    defer c.git_commit_free(commit);
+
+    var branch: ?*c.git_reference = null;
+    if (c.git_branch_lookup(&branch, repo, name_z, c.GIT_BRANCH_LOCAL) == 0) {
+        defer c.git_reference_free(branch);
+        const tip = c.git_reference_target(branch) orelse return error.Git;
+        if (c.git_oid_cmp(tip, pin) != 0) {
+            const pin_from_tip = c.git_graph_descendant_of(repo, pin, tip);
+            if (pin_from_tip < 0) return error.Git;
+            if (pin_from_tip == 0) {
+                const tip_from_pin = c.git_graph_descendant_of(repo, tip, pin);
+                if (tip_from_pin < 0) return error.Git;
+                if (tip_from_pin == 1) return error.Ahead;
+                return error.NotFastForward;
+            }
+            var new_ref: ?*c.git_reference = null;
+            try check(c.git_reference_set_target(&new_ref, branch, pin, "rc sync: attach to gitlink"));
+            defer c.git_reference_free(new_ref);
+        }
+    } else {
+        var created: ?*c.git_reference = null;
+        try check(c.git_branch_create(&created, repo, name_z, commit, 0));
+        defer c.git_reference_free(created);
+    }
+
+    try check(c.git_repository_set_head(repo, refname_z));
+    return name;
+}
+
+fn findLocalBranchAt(repo: *c.git_repository, pin: *const c.git_oid, arena: std.mem.Allocator) GitError!?[]const u8 {
+    var iter: ?*c.git_branch_iterator = null;
+    try check(c.git_branch_iterator_new(&iter, repo, c.GIT_BRANCH_LOCAL));
+    defer c.git_branch_iterator_free(iter);
+
+    var found_main: ?[]const u8 = null;
+    var found_master: ?[]const u8 = null;
+    var found_other: ?[]const u8 = null;
+
+    while (true) {
+        var ref: ?*c.git_reference = null;
+        var kind: c.git_branch_t = undefined;
+        const rc = c.git_branch_next(&ref, &kind, iter);
+        if (rc != 0) break;
+        defer c.git_reference_free(ref);
+        const tip = c.git_reference_target(ref) orelse continue;
+        if (c.git_oid_cmp(tip, pin) != 0) continue;
+        const n = try arena.dupe(u8, std.mem.span(c.git_reference_shorthand(ref)));
+        if (std.mem.eql(u8, n, "main")) found_main = n;
+        if (std.mem.eql(u8, n, "master")) found_master = n;
+        if (found_other == null) found_other = n;
+    }
+
+    return found_main orelse found_master orelse found_other;
 }
 
 pub fn addToIndex(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocator) GitError!void {
@@ -493,6 +588,8 @@ pub fn dieGit(app: *App, err: GitError) noreturn {
         error.NoTty => app.die("no TTY and no -m; pass -m or run in a terminal", .{}),
         error.Aborted => app.die("abort: empty commit message", .{}),
         error.NothingToCommit => app.die("nothing to commit", .{}),
+        error.WouldDetach => app.die("would detach HEAD; set branch= in .gitmodules", .{}),
+        error.Ahead => app.die("local branch is ahead of the recorded gitlink; rc commit first", .{}),
         error.OutOfMemory => app.die("out of memory", .{}),
     }
 }

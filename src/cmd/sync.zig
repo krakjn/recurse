@@ -23,10 +23,10 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
         if (s.skip) continue;
         // only sync direct children of this repo in this loop; nested handled if we open each
         if (!s.direct) continue;
-        git.syncSub(repo.ptr, s.name, app.arena) catch |e| {
+        const branch = git.syncSub(repo.ptr, s.name, app.arena) catch |e| {
             try app.stderr.print("{s}: {s}\n", .{ s.path, git.lastError() });
             git.dieGit(app, e);
         };
-        try app.print("synced {s}\n", .{s.path});
+        try app.print("synced {s} ({s})\n", .{ s.path, branch });
     }
 }

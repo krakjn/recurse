@@ -43,7 +43,7 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
     for (subs.items) |s| {
         if (s.skip) continue;
         if (!s.direct) continue;
-        git.syncSub(repo.ptr, s.name, app.arena) catch |e| git.dieGit(app, e);
-        try app.print("synced {s}\n", .{s.path});
+        const branch = git.syncSub(repo.ptr, s.name, app.arena) catch |e| git.dieGit(app, e);
+        try app.print("synced {s} ({s})\n", .{ s.path, branch });
     }
 }
