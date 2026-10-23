@@ -2,7 +2,26 @@ const std = @import("std");
 const c = @import("git2");
 const App = @import("app.zig").App;
 
-pub const GitError = error{ Git, OutOfMemory, Detached, Dirty, NotFastForward, Missing, Uncommitted, NoTty, Aborted, NothingToCommit, WouldDetach, Ahead };
+pub const GitError = error{
+    Git,
+    OutOfMemory,
+    Detached,
+    Dirty,
+    NotFastForward,
+    Missing,
+    Uncommitted,
+    NoTty,
+    Aborted,
+    NothingToCommit,
+    WouldDetach,
+    Ahead,
+    NoUpstream,
+    NoIdentity,
+    Uninitialized,
+    UnknownPath,
+    AmbiguousPath,
+    StagedOutside,
+};
 
 pub fn init() GitError!void {
     if (c.git_libgit2_init() < 0) return error.Git;
@@ -31,6 +50,8 @@ pub fn oidHex(oid: *const c.git_oid) [40]u8 {
 pub fn oidShort(oid: *const c.git_oid) [7]u8 {
     return oidHex(oid)[0..7].*;
 }
+
+pub const Repository = c.git_repository;
 
 pub const Repo = struct {
     ptr: *c.git_repository,
@@ -87,18 +108,13 @@ pub const Sub = struct {
     ahead: usize = 0,
     behind: usize = 0,
     direct: bool,
+    /// Path of the repo that contains this submodule. Empty for children of the project root.
+    parent_path: []const u8,
+    untracked: bool,
 };
 
-fn flagsDirty(st: c_uint) bool {
-    const wd_idx = @as(c_uint, 1) << 11;
-    const wd_wd = @as(c_uint, 1) << 12;
-    const wd_untracked = @as(c_uint, 1) << 13;
-    const wd_mod = @as(c_uint, 1) << 10;
-    return st & (wd_idx | wd_wd | wd_untracked | wd_mod) != 0;
-}
-
 fn flagsUninit(st: c_uint) bool {
-    return st & (@as(c_uint, 1) << 7) != 0;
+    return (st & @as(c_uint, @intCast(c.GIT_SUBMODULE_STATUS_WD_UNINITIALIZED))) != 0;
 }
 
 fn copyOptOid(oid: ?*const c.git_oid) ?c.git_oid {
@@ -107,7 +123,7 @@ fn copyOptOid(oid: ?*const c.git_oid) ?c.git_oid {
 }
 
 fn fillSub(arena: std.mem.Allocator, repo: *c.git_repository, name: []const u8, path_prefix: []const u8) GitError!Sub {
-    const name_z = try arena.dupeZ(u8, name);
+    const name_z = try arena.dupeSentinel(u8, name, 0);
     var sm: ?*c.git_submodule = null;
     try check(c.git_submodule_lookup(&sm, repo, name_z));
     defer c.git_submodule_free(sm);
@@ -116,7 +132,7 @@ fn fillSub(arena: std.mem.Allocator, repo: *c.git_repository, name: []const u8, 
     const full_path = if (path_prefix.len == 0)
         try arena.dupe(u8, path)
     else
-        try std.fmt.allocPrint(arena, "{s}/{s}", .{ path_prefix, path });
+        try arena.print("{s}/{s}", .{ path_prefix, path });
 
     const url_c = c.git_submodule_url(sm);
     const url = if (url_c) |u| try arena.dupe(u8, std.mem.span(u)) else "";
@@ -172,7 +188,7 @@ fn fillSub(arena: std.mem.Allocator, repo: *c.git_repository, name: []const u8, 
         .skip = skip,
         .uninitialized = flagsUninit(st),
         .detached = detached,
-        .dirty = flagsDirty(st),
+        .dirty = tracked_dirty,
         .tracked_dirty = tracked_dirty,
         .gitlink_mismatch = mismatch,
         .head = if (head_oid) |o| oidShort(&o) else null,
@@ -183,10 +199,12 @@ fn fillSub(arena: std.mem.Allocator, repo: *c.git_repository, name: []const u8, 
         .ahead = ahead,
         .behind = behind,
         .direct = path_prefix.len == 0,
+        .parent_path = try arena.dupe(u8, path_prefix),
+        .untracked = (st & @as(c_uint, @intCast(c.GIT_SUBMODULE_STATUS_WD_UNTRACKED))) != 0,
     };
 }
 
-fn aheadBehind(repo: *c.git_repository, ahead: *usize, behind: *usize) void {
+pub fn aheadBehind(repo: *c.git_repository, ahead: *usize, behind: *usize) void {
     var head: ?*c.git_reference = null;
     if (c.git_repository_head(&head, repo) != 0) return;
     defer c.git_reference_free(head);
@@ -218,7 +236,7 @@ pub fn listSubs(
         const sub = try fillSub(arena, repo, name, prefix);
         try out.append(arena, sub);
         if (recursive and !sub.uninitialized and !sub.skip) {
-            const name_z = try arena.dupeZ(u8, name);
+            const name_z = try arena.dupeSentinel(u8, name, 0);
             var sm: ?*c.git_submodule = null;
             if (c.git_submodule_lookup(&sm, repo, name_z) != 0) continue;
             defer c.git_submodule_free(sm);
@@ -231,13 +249,24 @@ pub fn listSubs(
 }
 
 pub fn parentDirty(repo: *c.git_repository) GitError!bool {
+    return hasTrackedChanges(repo, true);
+}
+
+pub fn parentUntracked(repo: *c.git_repository) GitError!bool {
     var opts = std.mem.zeroes(c.git_status_options);
     try check(c.git_status_options_init(&opts, c.GIT_STATUS_OPTIONS_VERSION));
     opts.flags = c.GIT_STATUS_OPT_INCLUDE_UNTRACKED | c.GIT_STATUS_OPT_EXCLUDE_SUBMODULES;
     var list: ?*c.git_status_list = null;
     try check(c.git_status_list_new(&list, repo, &opts));
     defer c.git_status_list_free(list);
-    return c.git_status_list_entrycount(list) > 0;
+    const n = c.git_status_list_entrycount(list);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const e = c.git_status_byindex(list, i);
+        if (e == null) continue;
+        if ((e.*.status & @as(c_uint, @intCast(c.GIT_STATUS_WT_NEW))) != 0) return true;
+    }
+    return false;
 }
 
 pub fn hasTrackedChanges(repo: *c.git_repository, exclude_submodules: bool) GitError!bool {
@@ -263,6 +292,7 @@ pub fn hasTrackedChanges(repo: *c.git_repository, exclude_submodules: bool) GitE
 }
 
 pub fn headName(arena: std.mem.Allocator, repo: *c.git_repository) GitError![]const u8 {
+    if (c.git_repository_head_unborn(repo) == 1) return try arena.dupe(u8, "unborn");
     if (c.git_repository_head_detached(repo) == 1) return try arena.dupe(u8, "detached");
     var ref: ?*c.git_reference = null;
     try check(c.git_repository_head(&ref, repo));
@@ -289,10 +319,10 @@ fn credCb(
     _ = payload;
     const ssh = @as(c_uint, @intCast(c.GIT_CREDENTIAL_SSH_KEY));
     const def = @as(c_uint, @intCast(c.GIT_CREDENTIAL_DEFAULT));
-    if (allowed_types & ssh != 0 and username_from_url != null) {
+    if ((allowed_types & ssh) != 0 and username_from_url != null) {
         return c.git_credential_ssh_key_from_agent(out, username_from_url);
     }
-    if (allowed_types & def != 0) {
+    if ((allowed_types & def) != 0) {
         return c.git_credential_default_new(out);
     }
     return -1;
@@ -314,7 +344,7 @@ pub fn fetchRemote(repo: *c.git_repository, name: [*:0]const u8) GitError!void {
 }
 
 pub fn syncSub(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocator) GitError![]const u8 {
-    const name_z = try arena.dupeZ(u8, name);
+    const name_z = try arena.dupeSentinel(u8, name, 0);
     var sm: ?*c.git_submodule = null;
     try check(c.git_submodule_lookup(&sm, repo, name_z));
     defer c.git_submodule_free(sm);
@@ -334,6 +364,11 @@ pub fn syncSub(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocat
                 branch_name = try arena.dupe(u8, std.mem.span(c.git_reference_shorthand(head_ref)));
             }
         }
+        if (c.git_submodule_head_id(sm)) |pin| {
+            _ = try classifyAttach(existing.?, pin, branch_name, arena);
+        }
+    } else if (branch_name == null and c.git_submodule_head_id(sm) != null) {
+        return error.WouldDetach;
     }
 
     var opts = std.mem.zeroes(c.git_submodule_update_options);
@@ -349,6 +384,34 @@ pub fn syncSub(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocat
     return attached;
 }
 
+/// Decide whether `pin` can be attached without moving any ref.
+/// A missing commit object is not a refusal: the caller may still fetch it.
+pub fn classifyAttach(
+    repo: *c.git_repository,
+    pin: *const c.git_oid,
+    preferred: ?[]const u8,
+    arena: std.mem.Allocator,
+) GitError![]const u8 {
+    const name = preferred orelse (try findLocalBranchAt(repo, pin, arena)) orelse return error.WouldDetach;
+    const name_z = try arena.dupeSentinel(u8, name, 0);
+    var branch: ?*c.git_reference = null;
+    if (c.git_branch_lookup(&branch, repo, name_z, c.GIT_BRANCH_LOCAL) != 0) return name;
+    defer c.git_reference_free(branch);
+    const tip = c.git_reference_target(branch) orelse return error.Git;
+    if (c.git_oid_cmp(tip, pin) == 0) return name;
+
+    const pin_ahead = c.git_graph_descendant_of(repo, pin, tip);
+    if (pin_ahead == c.GIT_ENOTFOUND) return name;
+    if (pin_ahead < 0) return error.Git;
+    if (pin_ahead == 1) return name;
+
+    const tip_ahead = c.git_graph_descendant_of(repo, tip, pin);
+    if (tip_ahead == c.GIT_ENOTFOUND) return name;
+    if (tip_ahead < 0) return error.Git;
+    if (tip_ahead == 1) return error.Ahead;
+    return error.NotFastForward;
+}
+
 /// Point a local branch at `pin` and check it out. Never leaves HEAD detached.
 /// Fast-forwards the branch if the pin is ahead; refuses to rewind.
 fn attachAtPin(
@@ -357,9 +420,9 @@ fn attachAtPin(
     preferred: ?[]const u8,
     arena: std.mem.Allocator,
 ) GitError![]const u8 {
-    const name = preferred orelse (try findLocalBranchAt(repo, pin, arena)) orelse return error.WouldDetach;
-    const name_z = try arena.dupeZ(u8, name);
-    const refname_z = try std.fmt.allocPrintSentinel(arena, "refs/heads/{s}", .{name}, 0);
+    const name = try classifyAttach(repo, pin, preferred, arena);
+    const name_z = try arena.dupeSentinel(u8, name, 0);
+    const refname_z = try arena.printSentinel("refs/heads/{s}", .{name}, 0);
 
     var commit: ?*c.git_commit = null;
     try check(c.git_commit_lookup(&commit, repo, pin));
@@ -379,7 +442,7 @@ fn attachAtPin(
                 return error.NotFastForward;
             }
             var new_ref: ?*c.git_reference = null;
-            try check(c.git_reference_set_target(&new_ref, branch, pin, "rc sync: attach to gitlink"));
+            try check(c.git_reference_set_target(&new_ref, branch, pin, "rc update: attach to gitlink"));
             defer c.git_reference_free(new_ref);
         }
     } else {
@@ -389,6 +452,9 @@ fn attachAtPin(
     }
 
     try check(c.git_repository_set_head(repo, refname_z));
+    var copts = std.mem.zeroes(c.git_checkout_options);
+    try check(c.git_checkout_options_init(&copts, c.GIT_CHECKOUT_OPTIONS_VERSION));
+    try check(c.git_checkout_head(repo, &copts));
     return name;
 }
 
@@ -419,35 +485,33 @@ fn findLocalBranchAt(repo: *c.git_repository, pin: *const c.git_oid, arena: std.
 }
 
 pub fn addToIndex(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocator) GitError!void {
-    const name_z = try arena.dupeZ(u8, name);
+    const name_z = try arena.dupeSentinel(u8, name, 0);
     var sm: ?*c.git_submodule = null;
     try check(c.git_submodule_lookup(&sm, repo, name_z));
     defer c.git_submodule_free(sm);
     try check(c.git_submodule_add_to_index(sm, 1));
 }
 
-pub fn commitTracked(repo: *c.git_repository, message: [*:0]const u8, exclude_submodules: bool) GitError!bool {
-    if (!try hasTrackedChanges(repo, exclude_submodules)) return false;
-
+pub fn commitTracked(repo: *c.git_repository, message: [*:0]const u8, update_worktree: bool) GitError!bool {
+    if (update_worktree and try hasTrackedChanges(repo, true)) {
+        if (c.git_repository_head_detached(repo) == 1) return error.Detached;
+        try requireIdentity(repo);
+    }
     var index: ?*c.git_index = null;
     try check(c.git_repository_index(&index, repo));
     defer c.git_index_free(index);
 
-    var empty = std.mem.zeroes(c.git_strarray);
-    try check(c.git_index_update_all(index, &empty, null, null));
-    try check(c.git_index_write(index));
+    if (update_worktree) {
+        var empty = std.mem.zeroes(c.git_strarray);
+        try check(c.git_index_update_all(index, &empty, null, null));
+        try check(c.git_index_write(index));
+    }
 
     var tree_oid: c.git_oid = undefined;
     try check(c.git_index_write_tree(&tree_oid, index));
-    var tree: ?*c.git_tree = null;
-    try check(c.git_tree_lookup(&tree, repo, &tree_oid));
-    defer c.git_tree_free(tree);
-
-    var sig: ?*c.git_signature = null;
-    try check(c.git_signature_default(&sig, repo));
-    defer c.git_signature_free(sig);
 
     var parent: ?*c.git_commit = null;
+    defer if (parent) |p| c.git_commit_free(p);
     var parent_count: usize = 0;
     var head_ref: ?*c.git_reference = null;
     if (c.git_repository_head(&head_ref, repo) == 0) {
@@ -456,9 +520,24 @@ pub fn commitTracked(repo: *c.git_repository, message: [*:0]const u8, exclude_su
         if (oid) |o| {
             try check(c.git_commit_lookup(&parent, repo, o));
             parent_count = 1;
+            const head_tree = c.git_commit_tree_id(parent);
+            if (c.git_oid_equal(&tree_oid, head_tree) == 1) return false;
         }
     }
-    defer if (parent) |p| c.git_commit_free(p);
+
+    if (c.git_repository_head_detached(repo) == 1) return error.Detached;
+
+    var sig: ?*c.git_signature = null;
+    const sig_rc = c.git_signature_default(&sig, repo);
+    if (sig_rc < 0) {
+        if (sig_rc == c.GIT_ENOTFOUND) return error.NoIdentity;
+        return error.Git;
+    }
+    defer c.git_signature_free(sig);
+
+    var tree: ?*c.git_tree = null;
+    try check(c.git_tree_lookup(&tree, repo, &tree_oid));
+    defer c.git_tree_free(tree);
 
     var parents_buf: [1]?*const c.git_commit = .{null};
     var parents_ptr: [*c]?*const c.git_commit = null;
@@ -483,18 +562,58 @@ pub fn commitTracked(repo: *c.git_repository, message: [*:0]const u8, exclude_su
     return true;
 }
 
-pub fn lookupOidAfterFetch(repo: *c.git_repository, oid: *const c.git_oid) GitError!void {
-    var obj: ?*c.git_object = null;
-    const rc = c.git_object_lookup(&obj, repo, oid, c.GIT_OBJECT_COMMIT);
-    if (rc == 0) {
-        c.git_object_free(obj);
-        return;
+fn requireIdentity(repo: *c.git_repository) GitError!void {
+    var sig: ?*c.git_signature = null;
+    const sig_rc = c.git_signature_default(&sig, repo);
+    if (sig_rc < 0) {
+        if (sig_rc == c.GIT_ENOTFOUND) return error.NoIdentity;
+        return error.Git;
     }
-    return error.Missing;
+    c.git_signature_free(sig);
+}
+
+/// Path-limited commits may stage gitlinks and nothing else.
+pub fn refuseForeignStaged(repo: *c.git_repository, allowed: []const []const u8) GitError!void {
+    var opts = std.mem.zeroes(c.git_status_options);
+    try check(c.git_status_options_init(&opts, c.GIT_STATUS_OPTIONS_VERSION));
+    var list: ?*c.git_status_list = null;
+    try check(c.git_status_list_new(&list, repo, &opts));
+    defer c.git_status_list_free(list);
+    const n = c.git_status_list_entrycount(list);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const entry = c.git_status_byindex(list, i) orelse continue;
+        const staged = entry.*.status & (c.GIT_STATUS_INDEX_NEW | c.GIT_STATUS_INDEX_MODIFIED |
+            c.GIT_STATUS_INDEX_DELETED | c.GIT_STATUS_INDEX_RENAMED | c.GIT_STATUS_INDEX_TYPECHANGE);
+        if (staged == 0) continue;
+        const delta = entry.*.head_to_index orelse return error.StagedOutside;
+        const path_c = delta.*.new_file.path orelse delta.*.old_file.path orelse return error.StagedOutside;
+        const path = std.mem.span(path_c);
+        var ok = false;
+        for (allowed) |allowed_path| {
+            if (std.mem.eql(u8, allowed_path, path)) ok = true;
+        }
+        if (!ok) return error.StagedOutside;
+    }
+}
+
+pub fn oidOnRemote(repo: *c.git_repository, oid: *const c.git_oid) bool {
+    var iter: ?*c.git_reference_iterator = null;
+    if (c.git_reference_iterator_glob_new(&iter, repo, "refs/remotes/*") != 0) return false;
+    defer c.git_reference_iterator_free(iter);
+    while (true) {
+        var ref: ?*c.git_reference = null;
+        if (c.git_reference_next(&ref, iter) != 0) break;
+        defer c.git_reference_free(ref);
+        const tip = c.git_reference_target(ref) orelse continue;
+        if (c.git_oid_cmp(tip, oid) == 0) return true;
+        if (c.git_graph_descendant_of(repo, tip, oid) == 1) return true;
+    }
+    return false;
 }
 
 pub fn openSub(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocator) GitError!Repo {
-    const name_z = try arena.dupeZ(u8, name);
+    const name_z = try arena.dupeSentinel(u8, name, 0);
     var sm: ?*c.git_submodule = null;
     try check(c.git_submodule_lookup(&sm, repo, name_z));
     defer c.git_submodule_free(sm);
@@ -503,17 +622,26 @@ pub fn openSub(repo: *c.git_repository, name: []const u8, arena: std.mem.Allocat
     return .{ .ptr = child.? };
 }
 
-pub fn ffPull(repo: *c.git_repository, ff_only: bool) GitError!void {
+pub const FastForward = struct {
+    /// Null when the branch already contains the upstream. Otherwise the commit to reset onto.
+    target: ?c.git_oid = null,
+};
+
+/// Fetch the upstream and classify. Does not move HEAD.
+pub fn ffPrepare(repo: *c.git_repository, arena: std.mem.Allocator, ff_only: bool) GitError!FastForward {
+    if (!ff_only) return error.NotFastForward;
+    if (c.git_repository_head_detached(repo) == 1) return error.Detached;
     var head: ?*c.git_reference = null;
     try check(c.git_repository_head(&head, repo));
     defer c.git_reference_free(head);
 
     var upstream: ?*c.git_reference = null;
-    try check(c.git_branch_upstream(&upstream, head));
-
-    try fetchRemote(repo, "origin");
-
+    if (c.git_branch_upstream(&upstream, head) != 0) return error.NoUpstream;
+    const remote_name = try remoteFromTracking(upstream, arena);
     c.git_reference_free(upstream);
+
+    try fetchRemote(repo, remote_name);
+
     upstream = null;
     try check(c.git_branch_upstream(&upstream, head));
     defer c.git_reference_free(upstream);
@@ -530,25 +658,73 @@ pub fn ffPull(repo: *c.git_repository, ff_only: bool) GitError!void {
 
     const up_to_date = @as(c_uint, @intCast(c.GIT_MERGE_ANALYSIS_UP_TO_DATE));
     const ff = @as(c_uint, @intCast(c.GIT_MERGE_ANALYSIS_FASTFORWARD));
-    const normal = @as(c_uint, @intCast(c.GIT_MERGE_ANALYSIS_NORMAL));
     const a = @as(c_uint, @intCast(analysis));
 
-    if (a & up_to_date != 0) return;
-    if (a & ff != 0) {
-        var obj: ?*c.git_object = null;
-        try check(c.git_object_lookup(&obj, repo, their_oid, c.GIT_OBJECT_COMMIT));
-        defer c.git_object_free(obj);
-        var new_ref: ?*c.git_reference = null;
-        try check(c.git_reference_set_target(&new_ref, head, their_oid, "rc pull: fast-forward"));
-        defer c.git_reference_free(new_ref);
-        var copts = std.mem.zeroes(c.git_checkout_options);
-        try check(c.git_checkout_options_init(&copts, c.GIT_CHECKOUT_OPTIONS_VERSION));
-        try check(c.git_reset(repo, obj, c.GIT_RESET_HARD, &copts));
-        return;
-    }
-    if (a & normal != 0) {
-        if (ff_only) return error.NotFastForward;
-        return error.NotFastForward; // first rip: never merge
+    if ((a & up_to_date) != 0) return .{};
+    if ((a & ff) != 0) return .{ .target = their_oid.* };
+    return error.NotFastForward;
+}
+
+pub fn ffApply(repo: *c.git_repository, target: c.git_oid) GitError!void {
+    var head: ?*c.git_reference = null;
+    try check(c.git_repository_head(&head, repo));
+    defer c.git_reference_free(head);
+    var obj: ?*c.git_object = null;
+    try check(c.git_object_lookup(&obj, repo, &target, c.GIT_OBJECT_COMMIT));
+    defer c.git_object_free(obj);
+    var new_ref: ?*c.git_reference = null;
+    try check(c.git_reference_set_target(&new_ref, head, &target, "rc pull: fast-forward"));
+    defer c.git_reference_free(new_ref);
+    var copts = std.mem.zeroes(c.git_checkout_options);
+    try check(c.git_checkout_options_init(&copts, c.GIT_CHECKOUT_OPTIONS_VERSION));
+    try check(c.git_reset(repo, obj, c.GIT_RESET_HARD, &copts));
+}
+
+/// Refuse to fast-forward `repo` onto `oid` when a nested branch cannot attach to the gitlink that commit records.
+pub fn preflightTree(
+    app: *App,
+    arena: std.mem.Allocator,
+    repo: *c.git_repository,
+    oid: *const c.git_oid,
+    prefix: []const u8,
+) GitError!void {
+    var commit: ?*c.git_commit = null;
+    try check(c.git_commit_lookup(&commit, repo, oid));
+    defer c.git_commit_free(commit);
+    var tree: ?*c.git_tree = null;
+    try check(c.git_commit_tree(&tree, commit));
+    defer c.git_tree_free(tree);
+
+    const n = c.git_tree_entrycount(tree);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const entry = c.git_tree_entry_byindex(tree, i) orelse continue;
+        if (c.git_tree_entry_filemode(entry) != @as(c_uint, @intCast(c.GIT_FILEMODE_COMMIT))) continue;
+        const name = std.mem.span(c.git_tree_entry_name(entry));
+        const pin = c.git_tree_entry_id(entry) orelse continue;
+        const full = if (prefix.len == 0)
+            try arena.dupe(u8, name)
+        else
+            try arena.print("{s}/{s}", .{ prefix, name });
+
+        const name_z = try arena.dupeSentinel(u8, name, 0);
+        var sm: ?*c.git_submodule = null;
+        if (c.git_submodule_lookup(&sm, repo, name_z) != 0) continue;
+        defer c.git_submodule_free(sm);
+        if (c.git_submodule_update_strategy(sm) == c.GIT_SUBMODULE_UPDATE_NONE) continue;
+
+        var branch: ?[]const u8 = null;
+        if (c.git_submodule_branch(sm)) |b| branch = try arena.dupe(u8, std.mem.span(b));
+
+        var child: ?*c.git_repository = null;
+        if (c.git_submodule_open(&child, sm) != 0) continue;
+        defer c.git_repository_free(child);
+        _ = classifyAttach(child.?, pin, branch, arena) catch |e| fail(app, full, e);
+        var nested: ?*c.git_commit = null;
+        if (c.git_commit_lookup(&nested, child.?, pin) == 0) {
+            c.git_commit_free(nested);
+            try preflightTree(app, arena, child.?, pin, full);
+        }
     }
 }
 
@@ -561,15 +737,25 @@ pub fn currentBranch(arena: std.mem.Allocator, repo: *c.git_repository) GitError
 }
 
 pub fn pushCurrent(repo: *c.git_repository, arena: std.mem.Allocator) GitError!void {
+    if (c.git_repository_head_detached(repo) == 1) return error.Detached;
     const branch = try currentBranch(arena, repo);
-    const spec = try std.fmt.allocPrintSentinel(arena, "refs/heads/{s}:refs/heads/{s}", .{ branch, branch }, 0);
+    var head: ?*c.git_reference = null;
+    try check(c.git_repository_head(&head, repo));
+    defer c.git_reference_free(head);
+    var upstream: ?*c.git_reference = null;
+    if (c.git_branch_upstream(&upstream, head) != 0) return error.NoUpstream;
+    defer c.git_reference_free(upstream);
+    const remote_name = try remoteFromTracking(upstream, arena);
+    const upstream_branch = try branchFromTracking(upstream);
+
+    const spec = try arena.printSentinel("refs/heads/{s}:refs/heads/{s}", .{ branch, upstream_branch }, 0);
     var spec_ptr: [*:0]u8 = spec;
     var specs = c.git_strarray{
         .strings = @ptrCast(&spec_ptr),
         .count = 1,
     };
     var remote: ?*c.git_remote = null;
-    try check(c.git_remote_lookup(&remote, repo, "origin"));
+    try check(c.git_remote_lookup(&remote, repo, remote_name));
     defer c.git_remote_free(remote);
     var opts = std.mem.zeroes(c.git_push_options);
     try check(c.git_push_options_init(&opts, c.GIT_PUSH_OPTIONS_VERSION));
@@ -578,18 +764,142 @@ pub fn pushCurrent(repo: *c.git_repository, arena: std.mem.Allocator) GitError!v
 }
 
 pub fn dieGit(app: *App, err: GitError) noreturn {
-    switch (err) {
-        error.Git => app.die("git: {s}", .{lastError()}),
-        error.Detached => app.die("detached HEAD; check out a branch first", .{}),
-        error.Dirty => app.die("dirty worktree; commit or clean before continuing", .{}),
-        error.NotFastForward => app.die("not a fast-forward (ff-only)", .{}),
-        error.Missing => app.die("gitlink SHA missing on remote", .{}),
-        error.Uncommitted => app.die("uncommitted changes; commit first", .{}),
-        error.NoTty => app.die("no TTY and no -m; pass -m or run in a terminal", .{}),
-        error.Aborted => app.die("abort: empty commit message", .{}),
-        error.NothingToCommit => app.die("nothing to commit", .{}),
-        error.WouldDetach => app.die("would detach HEAD; set branch= in .gitmodules", .{}),
-        error.Ahead => app.die("local branch is ahead of the recorded gitlink; rc commit first", .{}),
-        error.OutOfMemory => app.die("out of memory", .{}),
+    fail(app, "", err);
+}
+
+pub fn fail(app: *App, where: []const u8, err: GitError) noreturn {
+    const msg: []const u8 = switch (err) {
+        error.Git => lastError(),
+        error.Detached => "detached HEAD; run rc update to attach a branch",
+        error.Dirty => "tracked changes; commit or clean before continuing",
+        error.NotFastForward => "not a fast-forward (ff-only)",
+        error.Missing => "gitlink SHA missing on remote",
+        error.Uncommitted => "uncommitted changes; commit first",
+        error.NoTty => "no TTY and no -m; pass -m or run in a terminal",
+        error.Aborted => "abort: empty commit message",
+        error.NothingToCommit => "nothing to commit",
+        error.WouldDetach => "would detach HEAD; set branch= in .gitmodules",
+        error.Ahead => "local branch is ahead of the recorded gitlink; rc commit first",
+        error.NoUpstream => "no upstream; set a remote tracking branch",
+        error.NoIdentity => "set user.name and user.email",
+        error.Uninitialized => "uninitialized; run rc update",
+        error.UnknownPath => "unknown submodule",
+        error.AmbiguousPath => "ambiguous submodule path",
+        error.StagedOutside => "staged changes outside this path",
+        error.OutOfMemory => "out of memory",
+    };
+    if (where.len == 0) app.die("{s}", .{msg});
+    app.die("{s}: {s}", .{ where, msg });
+}
+
+pub const Opened = struct {
+    owned: ?Repo = null,
+    ptr: *c.git_repository,
+    name: []const u8 = "",
+
+    pub fn close(self: Opened) void {
+        if (self.owned) |r| r.close();
     }
+};
+
+pub fn openParent(root: *c.git_repository, sub: Sub, arena: std.mem.Allocator) GitError!Opened {
+    if (sub.parent_path.len == 0) return .{ .ptr = root, .name = sub.name };
+    const parent = try openByPath(root, sub.parent_path, arena);
+    return .{ .owned = parent, .ptr = parent.ptr, .name = sub.name };
+}
+
+pub fn openByPath(root: *c.git_repository, full_path: []const u8, arena: std.mem.Allocator) GitError!Repo {
+    var current = root;
+    var opened: ?Repo = null;
+    errdefer if (opened) |r| r.close();
+    var rest = full_path;
+    while (rest.len > 0) {
+        const step = try longestPrefixSub(current, rest, arena);
+        const child = try openSub(current, step.name, arena);
+        if (opened) |prev| prev.close();
+        opened = child;
+        current = child.ptr;
+        if (step.path.len == rest.len) return child;
+        rest = rest[step.path.len + 1 ..];
+    }
+    return error.Missing;
+}
+
+const Step = struct { name: []const u8, path: []const u8 };
+
+fn longestPrefixSub(repo: *c.git_repository, rest: []const u8, arena: std.mem.Allocator) GitError!Step {
+    var names: std.ArrayList([]const u8) = .empty;
+    var col: Collect = .{ .arena = arena, .names = &names };
+    try check(c.git_submodule_foreach(repo, foreachCb, &col));
+
+    var best: ?Step = null;
+    for (names.items) |name| {
+        const name_z = try arena.dupeSentinel(u8, name, 0);
+        var sm: ?*c.git_submodule = null;
+        if (c.git_submodule_lookup(&sm, repo, name_z) != 0) continue;
+        defer c.git_submodule_free(sm);
+        const path = std.mem.span(c.git_submodule_path(sm));
+        const eq = std.mem.eql(u8, rest, path);
+        const pref = rest.len > path.len and std.mem.startsWith(u8, rest, path) and rest[path.len] == '/';
+        if (!eq and !pref) continue;
+        if (best == null or path.len > best.?.path.len) {
+            best = .{
+                .name = try arena.dupe(u8, name),
+                .path = try arena.dupe(u8, path),
+            };
+        }
+    }
+    return best orelse error.Missing;
+}
+
+fn remoteFromTracking(upstream: ?*c.git_reference, arena: std.mem.Allocator) GitError![:0]const u8 {
+    const rest = try trackingRest(upstream);
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.NoUpstream;
+    if (slash == 0 or slash + 1 >= rest.len) return error.NoUpstream;
+    return arena.printSentinel("{s}", .{rest[0..slash]}, 0);
+}
+
+fn branchFromTracking(upstream: ?*c.git_reference) GitError![]const u8 {
+    const rest = try trackingRest(upstream);
+    const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.NoUpstream;
+    if (slash == 0 or slash + 1 >= rest.len) return error.NoUpstream;
+    return rest[slash + 1 ..];
+}
+
+fn trackingRest(upstream: ?*c.git_reference) GitError![]const u8 {
+    const name = std.mem.span(c.git_reference_name(upstream));
+    const prefix = "refs/remotes/";
+    if (!std.mem.startsWith(u8, name, prefix)) return error.NoUpstream;
+    return name[prefix.len..];
+}
+
+pub fn sortDeepest(subs: []Sub) void {
+    std.mem.sort(Sub, subs, {}, struct {
+        fn lessThan(_: void, a: Sub, b: Sub) bool {
+            const da = pathDepth(a.path);
+            const db = pathDepth(b.path);
+            if (da != db) return da > db;
+            return std.mem.lessThan(u8, a.path, b.path);
+        }
+    }.lessThan);
+}
+
+pub fn sortShallowest(subs: []Sub) void {
+    std.mem.sort(Sub, subs, {}, struct {
+        fn lessThan(_: void, a: Sub, b: Sub) bool {
+            const da = pathDepth(a.path);
+            const db = pathDepth(b.path);
+            if (da != db) return da < db;
+            return std.mem.lessThan(u8, a.path, b.path);
+        }
+    }.lessThan);
+}
+
+fn pathDepth(path: []const u8) usize {
+    if (path.len == 0) return 0;
+    var n: usize = 1;
+    for (path) |ch| {
+        if (ch == '/') n += 1;
+    }
+    return n;
 }

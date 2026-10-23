@@ -4,57 +4,91 @@ const App = @import("../app.zig").App;
 const git = @import("../git.zig");
 const config = @import("../config.zig");
 const cli = @import("../cli.zig");
+const tree = @import("../tree.zig");
 
 pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !void {
     const recursive = parsed.recursive orelse cfg.recursive;
     var subs: std.ArrayList(git.Sub) = .empty;
-    git.listSubs(app.arena, repo.ptr, "", recursive, &subs) catch |e| git.dieGit(app, e);
+    git.listSubs(app.arena, repo.ptr, "", recursive, &subs) catch |e| git.fail(app, ".", e);
+    const paths = tree.resolve(app, app.arena, subs.items, parsed.paths);
+
+    var already: std.ArrayList([]const u8) = .empty;
+    git.sortDeepest(subs.items);
 
     for (subs.items) |s| {
-        if (s.skip or s.uninitialized) continue;
-        if (s.tracked_dirty and s.detached) {
-            app.die("{s}: detached HEAD; check out a branch first", .{s.path});
+        if (s.skip or !tree.affected(paths, s.path)) continue;
+        if (s.uninitialized) failCommit(app, already.items, s.path, error.Uninitialized);
+        const files = tree.inScope(paths, s.path);
+        if (files and s.tracked_dirty and s.detached) {
+            failCommit(app, already.items, s.path, error.Detached);
         }
     }
 
-    const msg = parsed.message orelse (readEditorMessage(app, repo) catch |e| git.dieGit(app, e));
-    const msg_z = app.arena.dupeZ(u8, msg) catch app.die("oom", .{});
+    const msg = parsed.message orelse (readEditorMessage(app, repo) catch |e| git.fail(app, ".", e));
+    const msg_z = app.arena.dupeSentinel(u8, msg, 0) catch app.die("out of memory", .{});
 
-    var child_committed: usize = 0;
     for (subs.items) |s| {
-        if (s.skip or s.uninitialized) continue;
-        if (!s.direct) continue;
-        if (!s.tracked_dirty) continue;
-        const child = git.openSub(repo.ptr, s.name, app.arena) catch |e| git.dieGit(app, e);
+        if (s.skip or s.uninitialized or !tree.affected(paths, s.path)) continue;
+        const files = tree.inScope(paths, s.path);
+        const child = git.openByPath(repo.ptr, s.path, app.arena) catch |e| failCommit(app, already.items, s.path, e);
         defer child.close();
-        const did = git.commitTracked(child.ptr, msg_z, true) catch |e| git.dieGit(app, e);
+        if (!files) {
+            const allowed = gitlinksUnder(app, subs.items, s.path, paths);
+            git.refuseForeignStaged(child.ptr, allowed) catch |e| failCommit(app, already.items, s.path, e);
+        }
+        const did = git.commitTracked(child.ptr, msg_z, files) catch |e| failCommit(app, already.items, s.path, e);
         if (did) {
-            child_committed += 1;
+            already.append(app.arena, s.path) catch app.die("out of memory", .{});
             try app.print("committed {s}\n", .{s.path});
         }
+        const parent = git.openParent(repo.ptr, s, app.arena) catch |e| failCommit(app, already.items, s.path, e);
+        defer parent.close();
+        git.addToIndex(parent.ptr, parent.name, app.arena) catch |e| failCommit(app, already.items, s.path, e);
     }
 
-    for (subs.items) |s| {
-        if (s.skip or s.uninitialized) continue;
-        if (!s.direct) continue;
-        git.addToIndex(repo.ptr, s.name, app.arena) catch |e| git.dieGit(app, e);
+    if (paths.len != 0) {
+        const allowed = gitlinksUnder(app, subs.items, "", paths);
+        git.refuseForeignStaged(repo.ptr, allowed) catch |e| failCommit(app, already.items, ".", e);
     }
-
-    const parent_did = git.commitTracked(repo.ptr, msg_z, false) catch |e| git.dieGit(app, e);
+    const parent_did = git.commitTracked(repo.ptr, msg_z, paths.len == 0) catch |e| failCommit(app, already.items, ".", e);
     if (!parent_did) {
-        if (child_committed > 0) {
-            app.die("children committed but superproject had nothing to record", .{});
-        }
-        git.dieGit(app, error.NothingToCommit);
+        if (already.items.len > 0) failCommit(app, already.items, ".", error.NothingToCommit);
+        git.fail(app, ".", error.NothingToCommit);
     }
-    try app.print("committed superproject\n", .{});
+    try app.print("committed .\n", .{});
+}
+
+fn gitlinksUnder(
+    app: *App,
+    subs: []const git.Sub,
+    parent: []const u8,
+    paths: []const []const u8,
+) []const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    for (subs) |s| {
+        if (!std.mem.eql(u8, s.parent_path, parent)) continue;
+        if (!tree.affected(paths, s.path)) continue;
+        const rel = if (parent.len == 0) s.path else s.path[parent.len + 1 ..];
+        out.append(app.arena, rel) catch app.die("out of memory", .{});
+    }
+    return out.toOwnedSlice(app.arena) catch app.die("out of memory", .{});
+}
+
+fn failCommit(app: *App, already: []const []const u8, where: []const u8, err: git.GitError) noreturn {
+    if (already.len > 0) {
+        app.stderr.print("already committed:\n", .{}) catch {};
+        for (already) |p| app.stderr.print("  {s}\n", .{p}) catch {};
+        app.stderr.print("superproject was not updated\n", .{}) catch {};
+        app.stderr.flush() catch {};
+    }
+    git.fail(app, where, err);
 }
 
 fn readEditorMessage(app: *App, repo: git.Repo) git.GitError![]const u8 {
     const tty = Io.File.stdin().isTty(app.io) catch return error.NoTty;
     if (!tty) return error.NoTty;
 
-    const path_z = try std.fmt.allocPrintSentinel(app.arena, "{s}RC_EDITMSG", .{repo.gitdir()}, 0);
+    const path_z = try app.arena.printSentinel("{s}RC_EDITMSG", .{repo.gitdir()}, 0);
     const file = Io.Dir.createFileAbsolute(app.io, path_z, .{}) catch return error.Git;
     {
         defer file.close(app.io);

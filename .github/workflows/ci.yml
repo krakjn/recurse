@@ -1,0 +1,123 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            os: ubuntu-latest
+            artifact: recurse-x86_64-linux
+            extra_args: ""
+          - name: aarch64-linux
+            os: ubuntu-24.04-arm
+            artifact: recurse-aarch64-linux
+            extra_args: ""
+          - name: x86_64-linux-musl
+            os: ubuntu-latest
+            artifact: recurse-x86_64-linux-musl
+            extra_args: "-Dtarget=x86_64-linux-musl -Dssh=false"
+          - name: aarch64-macos
+            os: macos-latest
+            artifact: recurse-aarch64-macos
+            extra_args: ""
+          - name: x86_64-macos
+            os: macos-15-intel
+            artifact: recurse-x86_64-macos
+            extra_args: ""
+          - name: x86_64-windows
+            os: windows-latest
+            artifact: recurse-x86_64-windows
+            extra_args: "-Dssh=false"
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Install libssh2
+        if: runner.os == 'Linux' && !contains(matrix.extra_args, '-Dssh=false')
+        run: sudo apt-get update && sudo apt-get install -y libssh2-1-dev pkg-config
+
+      - name: Install libssh2
+        if: runner.os == 'macOS'
+        run: brew install libssh2
+
+      - name: Test
+        if: matrix.extra_args == ''
+        run: zig build test --summary all
+
+      - name: Build
+        run: zig build -Doptimize=safe ${{ matrix.extra_args }} --summary all
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          bin=zig-out/bin/recurse
+          cp "$bin" "dist/${{ matrix.artifact }}"
+          chmod +x "dist/${{ matrix.artifact }}"
+          (cd dist && tar -czf "${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}")
+          rm "dist/${{ matrix.artifact }}"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp zig-out/bin/recurse.exe dist/${{ matrix.artifact }}.exe
+          (cd dist && 7z a -tzip ${{ matrix.artifact }}.zip ${{ matrix.artifact }}.exe)
+          rm dist/${{ matrix.artifact }}.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/* \
+            --title "${{ github.ref_name }}" \
+            --generate-notes \
+            --verify-tag

@@ -2,11 +2,10 @@ const std = @import("std");
 
 pub const Cmd = enum {
     status,
-    sync,
+    update,
     commit,
     pull,
     push,
-    verify,
     help,
 };
 
@@ -16,7 +15,6 @@ pub const Parsed = struct {
     jobs: u32 = 0,
     recursive: ?bool = null,
     message: ?[]const u8 = null,
-    json: bool = false,
     paths: []const []const u8 = &.{},
 };
 
@@ -62,10 +60,6 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) ParseError!Pars
             out.recursive = false;
             continue;
         }
-        if (std.mem.eql(u8, a, "--json")) {
-            out.json = true;
-            continue;
-        }
         if (std.mem.eql(u8, a, "-m") or std.mem.eql(u8, a, "--message")) {
             i += 1;
             if (i >= args.len) return error.Usage;
@@ -91,33 +85,35 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) ParseError!Pars
         try paths.append(arena, a);
     }
 
+    if (out.cmd == .pull and paths.items.len != 0) return error.Usage;
+
     out.paths = try paths.toOwnedSlice(arena);
     return out;
 }
 
 pub const usage =
-    \\Recurse (rc) — git-shaped frontend for a superproject with submodules.
+    \\ ▛▘█▌▛▘▌▌▛▘▛▘█▌
+    \\ ▌ ▙▖▙▖▙▌▌ ▄▌▙▖
+    \\ recurse (rc): move a superproject's gitlinks
     \\
     \\Usage: recurse [command] [options]
     \\
     \\Commands:
-    \\  status              recursive snapshot (default)
-    \\  sync                checkout gitlinks from parent HEAD (fails if dirty)
-    \\  commit [-m MSG]     commit children then the superproject
-    \\  pull [PATH]         pull parent then sync, or absorb one nested repo
-    \\  push                push children then the superproject
-    \\  verify [--json]     fail if a gitlink SHA is missing on its remote
+    \\  status              snapshot (default)
+    \\  update [PATH]       check out recorded gitlinks and attach a branch
+    \\  commit [-m MSG]     commit nested repos, then the superproject
+    \\  pull                fast-forward the superproject, then update
+    \\  push                push nested repos, then the superproject
     \\
     \\Options:
     \\  --config PATH       recurse.toml override
     \\  --recursive / --no-recursive
-    \\  --jobs N
     \\  -h, --help
     \\
 ;
 
 test "parse default status" {
-    const parsed = try parse(std.testing.allocator, &.{ "recurse" });
+    const parsed = try parse(std.testing.allocator, &.{"recurse"});
     try std.testing.expectEqual(Cmd.status, parsed.cmd);
 }
 

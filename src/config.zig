@@ -3,8 +3,6 @@ const Io = std.Io;
 
 pub const Config = struct {
     recursive: bool = true,
-    verify_fetch: bool = true,
-    require_on_remote: bool = true,
     pull_ff_only: bool = true,
 };
 
@@ -18,20 +16,20 @@ pub fn load(
 
     var cwd_buf: [Io.Dir.max_path_bytes]u8 = undefined;
     const cwd_len = try std.process.currentPath(io, &cwd_buf);
-    if (findUp(io, cwd_buf[0..cwd_len], "recurse.toml")) |found| {
+    if (findUp(arena, io, cwd_buf[0..cwd_len], "recurse.toml")) |found| {
         return parseFile(arena, io, found);
     }
     if (workdir) |wd| {
-        const p = try std.fmt.allocPrint(arena, "{s}recurse.toml", .{slash(wd)});
+        const p = try joinToml(arena, wd);
         if (exists(io, p)) return parseFile(arena, io, p);
     }
     return .{};
 }
 
-fn slash(dir: []const u8) []const u8 {
-    if (dir.len == 0) return dir;
-    if (dir[dir.len - 1] == '/') return dir;
-    return dir; // join below adds slash when needed
+fn joinToml(arena: std.mem.Allocator, dir: []const u8) ![]u8 {
+    if (dir.len == 0) return try arena.dupe(u8, "recurse.toml");
+    if (dir[dir.len - 1] == '/') return try arena.print("{s}recurse.toml", .{dir});
+    return try arena.print("{s}/recurse.toml", .{dir});
 }
 
 fn exists(io: Io, path: []const u8) bool {
@@ -39,7 +37,7 @@ fn exists(io: Io, path: []const u8) bool {
     return true;
 }
 
-fn findUp(io: Io, start: []const u8, name: []const u8) ?[]const u8 {
+fn findUp(arena: std.mem.Allocator, io: Io, start: []const u8, name: []const u8) ?[]const u8 {
     var buf: [Io.Dir.max_path_bytes]u8 = undefined;
     if (start.len >= buf.len) return null;
     @memcpy(buf[0..start.len], start);
@@ -51,8 +49,7 @@ fn findUp(io: Io, start: []const u8, name: []const u8) ?[]const u8 {
             std.fmt.bufPrint(buf[len..], "/{s}", .{name}) catch return null;
         const full = buf[0 .. len + path_len.len];
         if (exists(io, full)) {
-            const out = std.heap.page_allocator.dupe(u8, full) catch return null;
-            return out;
+            return arena.dupe(u8, full) catch return null;
         }
         if (len == 0 or (len == 1 and buf[0] == '/')) return null;
         while (len > 0 and buf[len - 1] != '/') len -= 1;
@@ -86,8 +83,6 @@ fn parseToml(src: []const u8) Config {
             val = val[1 .. val.len - 1];
         }
         if (std.mem.eql(u8, key, "recursive")) cfg.recursive = truthy(val);
-        if (std.mem.eql(u8, key, "fetch")) cfg.verify_fetch = truthy(val);
-        if (std.mem.eql(u8, key, "require_on_remote")) cfg.require_on_remote = truthy(val);
         if (std.mem.eql(u8, key, "ff")) cfg.pull_ff_only = !std.mem.eql(u8, val, "false") and !std.mem.eql(u8, val, "no");
     }
     return cfg;

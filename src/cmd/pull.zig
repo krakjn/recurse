@@ -5,45 +5,22 @@ const config = @import("../config.zig");
 const cli = @import("../cli.zig");
 
 pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !void {
-    const recursive = parsed.recursive orelse cfg.recursive;
+    if (!cfg.pull_ff_only) app.die("pull.ff must be only", .{});
+
     var subs: std.ArrayList(git.Sub) = .empty;
-    git.listSubs(app.arena, repo.ptr, "", recursive, &subs) catch |e| git.dieGit(app, e);
-
-    if (parsed.paths.len > 0) {
-        const want = parsed.paths[0];
-        for (subs.items) |s| {
-            if (!std.mem.eql(u8, s.path, want) and !std.mem.eql(u8, s.name, want)) continue;
-            if (s.skip) app.die("{s}: skipped (update = none)", .{s.path});
-            if (s.dirty) git.dieGit(app, error.Dirty);
-            if (s.uninitialized) app.die("{s}: uninitialized; run rc sync first", .{s.path});
-            const child = git.openSub(repo.ptr, s.name, app.arena) catch |e| git.dieGit(app, e);
-            defer child.close();
-            git.ffPull(child.ptr, cfg.pull_ff_only) catch |e| git.dieGit(app, e);
-            git.addToIndex(repo.ptr, s.name, app.arena) catch |e| git.dieGit(app, e);
-            try app.print("pulled {s}; gitlink staged — rc commit to record\n", .{s.path});
-            return;
-        }
-        app.die("unknown submodule: {s}", .{want});
-    }
+    git.listSubs(app.arena, repo.ptr, "", true, &subs) catch |e| git.fail(app, ".", e);
 
     for (subs.items) |s| {
         if (s.skip) continue;
-        if (s.dirty) {
-            try app.print("dirty: {s}\n", .{s.path});
-            git.dieGit(app, error.Dirty);
-        }
+        if (s.tracked_dirty) git.fail(app, s.path, error.Dirty);
     }
-    if (git.parentDirty(repo.ptr) catch |e| git.dieGit(app, e)) {
-        git.dieGit(app, error.Dirty);
-    }
+    if (git.parentDirty(repo.ptr) catch |e| git.fail(app, ".", e)) git.fail(app, ".", error.Dirty);
 
-    git.ffPull(repo.ptr, cfg.pull_ff_only) catch |e| git.dieGit(app, e);
-    try app.print("pulled superproject\n", .{});
-
-    for (subs.items) |s| {
-        if (s.skip) continue;
-        if (!s.direct) continue;
-        const branch = git.syncSub(repo.ptr, s.name, app.arena) catch |e| git.dieGit(app, e);
-        try app.print("synced {s} ({s})\n", .{ s.path, branch });
+    const prepared = git.ffPrepare(repo.ptr, app.arena, true) catch |e| git.fail(app, ".", e);
+    if (prepared.target) |target| {
+        try git.preflightTree(app, app.arena, repo.ptr, &target, "");
+        git.ffApply(repo.ptr, target) catch |e| git.fail(app, ".", e);
     }
+    try app.print("pulled .\n", .{});
+    try @import("update.zig").run(app, .{ .cmd = .update, .recursive = parsed.recursive }, cfg, repo);
 }

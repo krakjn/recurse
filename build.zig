@@ -4,10 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const enable_ssh = b.option(bool, "ssh", "Link libssh2 for SSH remotes") orelse
+        (target.result.os.tag != .windows);
+
     const libgit2_dep = b.dependency("libgit2", .{
         .target = target,
         .optimize = optimize,
-        .@"enable-ssh" = true,
+        .@"enable-ssh" = enable_ssh,
     });
 
     const exe = b.addExecutable(.{
@@ -28,7 +31,7 @@ pub fn build(b: *std.Build) void {
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_cmd.addArgs(args);
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run recurse");
     run_step.dependOn(&run_cmd.step);
 

@@ -7,11 +7,10 @@ const git = @import("git.zig");
 const App = @import("app.zig").App;
 
 const cmd_status = @import("cmd/status.zig");
-const cmd_sync = @import("cmd/sync.zig");
+const cmd_update = @import("cmd/update.zig");
 const cmd_commit = @import("cmd/commit.zig");
 const cmd_pull = @import("cmd/pull.zig");
 const cmd_push = @import("cmd/push.zig");
-const cmd_verify = @import("cmd/verify.zig");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -36,7 +35,8 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(arena);
     const parsed = cli.parse(arena, args) catch {
-        try app.stderr.writeAll(cli.usage);
+        app.stderr.writeAll(cli.usage) catch {};
+        app.stderr.flush() catch {};
         std.process.exit(2);
     };
     if (parsed.cmd == .help) {
@@ -58,11 +58,10 @@ pub fn main(init: std.process.Init) !void {
 
     switch (parsed.cmd) {
         .status => try cmd_status.run(&app, parsed, cfg, repo),
-        .sync => try cmd_sync.run(&app, parsed, cfg, repo),
+        .update => try cmd_update.run(&app, parsed, cfg, repo),
         .commit => try cmd_commit.run(&app, parsed, cfg, repo),
         .pull => try cmd_pull.run(&app, parsed, cfg, repo),
         .push => try cmd_push.run(&app, parsed, cfg, repo),
-        .verify => try cmd_verify.run(&app, parsed, cfg, repo),
         .help => unreachable,
     }
 }

@@ -6,19 +6,28 @@ const cli = @import("../cli.zig");
 
 pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !void {
     const recursive = parsed.recursive orelse cfg.recursive;
-    const parent_name = try git.headName(app.arena, repo.ptr);
+    const parent_name = git.headName(app.arena, repo.ptr) catch |e| git.fail(app, ".", e);
     const parent_sha = git.headShort(repo.ptr);
-    const pdirty = git.parentDirty(repo.ptr) catch |e| git.dieGit(app, e);
+    const pdirty = git.parentDirty(repo.ptr) catch |e| git.fail(app, ".", e);
+    const puntracked = git.parentUntracked(repo.ptr) catch |e| git.fail(app, ".", e);
+    const parent_state: []const u8 = if (pdirty and puntracked)
+        "dirty untracked"
+    else if (pdirty)
+        "dirty"
+    else if (puntracked)
+        "untracked"
+    else
+        "clean";
 
     try app.print("{s:<24} {s:<12} {s:<6} {s}\n", .{
         ".",
         parent_name,
-        if (pdirty) "dirty" else "clean",
+        parent_state,
         if (parent_sha) |s| s[0..] else "-",
     });
 
     var subs: std.ArrayList(git.Sub) = .empty;
-    git.listSubs(app.arena, repo.ptr, "", recursive, &subs) catch |e| git.dieGit(app, e);
+    git.listSubs(app.arena, repo.ptr, "", recursive, &subs) catch |e| git.fail(app, ".", e);
 
     for (subs.items) |s| {
         const ref = s.ref_name orelse s.branch orelse "-";
@@ -28,7 +37,8 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
         if (s.skip) try app.print(" skip", .{});
         if (s.detached) try app.print(" detached", .{});
         if (s.dirty) try app.print(" dirty", .{});
-        if (s.gitlink_mismatch) try app.print(" mismatch", .{});
+        if (s.untracked) try app.print(" untracked", .{});
+        if (s.gitlink_mismatch) if (s.head) |pin| try app.print(" pin {s}", .{&pin});
         if (s.ahead > 0) try app.print(" ahead {d}", .{s.ahead});
         if (s.behind > 0) try app.print(" behind {d}", .{s.behind});
         try app.print("\n", .{});
