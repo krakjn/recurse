@@ -31,7 +31,7 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
         defer child.close();
         git.pushCurrent(child.ptr, app.arena) catch |e| git.fail(app, s.path, e);
         pushed.append(app.arena, s.path) catch app.die("out of memory", .{});
-        try app.print("pushed {s}\n", .{s.path});
+        try app.ok("pushed", s.path);
     }
 
     const push_parent = paths.len == 0 or parentAhead(repo.ptr);
@@ -45,7 +45,7 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
             if (!git.oidOnRemote(child.ptr, &pin)) git.fail(app, s.path, error.NoUpstream);
         }
         git.pushCurrent(repo.ptr, app.arena) catch |e| git.fail(app, ".", e);
-        try app.print("pushed .\n", .{});
+        try app.ok("pushed", ".");
     }
 }
 

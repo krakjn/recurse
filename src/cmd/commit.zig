@@ -39,7 +39,7 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
         const did = git.commitTracked(child.ptr, msg_z, files) catch |e| failCommit(app, already.items, s.path, e);
         if (did) {
             already.append(app.arena, s.path) catch app.die("out of memory", .{});
-            try app.print("committed {s}\n", .{s.path});
+            try app.ok("committed", s.path);
         }
         const parent = git.openParent(repo.ptr, s, app.arena) catch |e| failCommit(app, already.items, s.path, e);
         defer parent.close();
@@ -55,7 +55,7 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
         if (already.items.len > 0) failCommit(app, already.items, ".", error.NothingToCommit);
         git.fail(app, ".", error.NothingToCommit);
     }
-    try app.print("committed .\n", .{});
+    try app.ok("committed", ".");
 }
 
 fn gitlinksUnder(
@@ -76,9 +76,11 @@ fn gitlinksUnder(
 
 fn failCommit(app: *App, already: []const []const u8, where: []const u8, err: git.GitError) noreturn {
     if (already.len > 0) {
-        app.stderr.print("already committed:\n", .{}) catch {};
+        app.paintErr(.yellow, "already committed:");
+        app.stderr.writeAll("\n") catch {};
         for (already) |p| app.stderr.print("  {s}\n", .{p}) catch {};
-        app.stderr.print("superproject was not updated\n", .{}) catch {};
+        app.paintErr(.yellow, "superproject was not updated");
+        app.stderr.writeAll("\n") catch {};
         app.stderr.flush() catch {};
     }
     git.fail(app, where, err);

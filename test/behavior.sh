@@ -239,7 +239,7 @@ line=$(grep "mid/leaf" <<<"$st" | head -1)
 echo "$line"
 grep -q "$checkout" <<<"$line"
 grep -q "pin $recorded" <<<"$line"
-other_line=$(grep "  other " <<<"$st" | head -1)
+other_line=$(grep -E '^  other([^[:alnum:]_]|$)' <<<"$st" | head -1)
 if grep -q " pin " <<<"$other_line"; then
   echo "matching HEAD printed a pin: $other_line" >&2
   exit 1
@@ -256,7 +256,7 @@ git -C "$work/other-up" commit -qm upstream
 git -C "$work/other-up" push -q origin main
 git -C "$proj/other" fetch -q
 st=$(runrc status)
-oline=$(grep "  other " <<<"$st" | head -1)
+oline=$(grep -E '^  other([^[:alnum:]_]|$)' <<<"$st" | head -1)
 echo "$oline"
 grep -q "behind" <<<"$oline"
 if grep -q " pin " <<<"$oline"; then

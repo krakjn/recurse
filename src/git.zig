@@ -788,8 +788,7 @@ pub fn fail(app: *App, where: []const u8, err: GitError) noreturn {
         error.StagedOutside => "staged changes outside this path",
         error.OutOfMemory => "out of memory",
     };
-    if (where.len == 0) app.die("{s}", .{msg});
-    app.die("{s}: {s}", .{ where, msg });
+    app.report(where, msg);
 }
 
 pub const Opened = struct {

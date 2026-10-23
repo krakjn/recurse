@@ -1,4 +1,6 @@
 const std = @import("std");
+const Io = std.Io;
+const style = @import("style.zig");
 
 pub const Cmd = enum {
     status,
@@ -15,6 +17,7 @@ pub const Parsed = struct {
     jobs: u32 = 0,
     recursive: ?bool = null,
     message: ?[]const u8 = null,
+    color: style.When = .auto,
     paths: []const []const u8 = &.{},
 };
 
@@ -60,6 +63,16 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) ParseError!Pars
             out.recursive = false;
             continue;
         }
+        if (std.mem.eql(u8, a, "--color")) {
+            i += 1;
+            if (i >= args.len) return error.Usage;
+            out.color = std.meta.stringToEnum(style.When, args[i]) orelse return error.Usage;
+            continue;
+        }
+        if (std.mem.startsWith(u8, a, "--color=")) {
+            out.color = std.meta.stringToEnum(style.When, a["--color=".len..]) orelse return error.Usage;
+            continue;
+        }
         if (std.mem.eql(u8, a, "-m") or std.mem.eql(u8, a, "--message")) {
             i += 1;
             if (i >= args.len) return error.Usage;
@@ -91,26 +104,38 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) ParseError!Pars
     return out;
 }
 
-pub const usage =
-    \\ ▛▘█▌▛▘▌▌▛▘▛▘█▌
-    \\ ▌ ▙▖▙▖▙▌▌ ▄▌▙▖
-    \\ recurse (rc): move a superproject's gitlinks
-    \\
-    \\Usage: recurse [command] [options]
-    \\
-    \\Commands:
-    \\  status              snapshot (default)
-    \\  update [PATH]       check out recorded gitlinks and attach a branch
-    \\  commit [-m MSG]     commit nested repos, then the superproject
-    \\  pull                fast-forward the superproject, then update
-    \\  push                push nested repos, then the superproject
-    \\
-    \\Options:
-    \\  --config PATH       recurse.toml override
-    \\  --recursive / --no-recursive
-    \\  -h, --help
-    \\
-;
+pub fn writeUsage(w: *Io.Writer, on: bool) !void {
+    try style.write(w, on, .cyan_bold, " ▛▘█▌▛▘▌▌▛▘▛▘█▌\n");
+    try style.write(w, on, .cyan_bold, " ▌ ▙▖▙▖▙▌▌ ▄▌▙▖\n");
+    try style.write(w, on, .dim, " recurse (rc): move a superproject's gitlinks\n");
+    try w.writeAll(
+        \\
+        \\Usage: recurse [command] [options]
+        \\
+        \\Commands:
+        \\
+    );
+    try writeCmd(w, on, "status", "              snapshot (default)\n");
+    try writeCmd(w, on, "update", " [PATH]       check out recorded gitlinks and attach a branch\n");
+    try writeCmd(w, on, "commit", " [-m MSG]     commit nested repos, then the superproject\n");
+    try writeCmd(w, on, "pull", "                fast-forward the superproject, then update\n");
+    try writeCmd(w, on, "push", "                push nested repos, then the superproject\n");
+    try w.writeAll(
+        \\
+        \\Options:
+        \\  --config PATH       recurse.toml override
+        \\  --recursive / --no-recursive
+        \\  --color WHEN        auto, always, or never
+        \\  -h, --help
+        \\
+    );
+}
+
+fn writeCmd(w: *Io.Writer, on: bool, name: []const u8, rest: []const u8) !void {
+    try w.writeAll("  ");
+    try style.write(w, on, .cyan, name);
+    try w.writeAll(rest);
+}
 
 test "parse default status" {
     const parsed = try parse(std.testing.allocator, &.{"recurse"});
@@ -121,4 +146,41 @@ test "parse commit -m" {
     const parsed = try parse(std.testing.allocator, &.{ "recurse", "commit", "-m", "hi" });
     try std.testing.expectEqual(Cmd.commit, parsed.cmd);
     try std.testing.expectEqualStrings("hi", parsed.message.?);
+}
+
+test "parse color" {
+    const parsed = try parse(std.testing.allocator, &.{ "recurse", "--color", "never", "status" });
+    try std.testing.expectEqual(style.When.never, parsed.color);
+    try std.testing.expectEqual(Cmd.status, parsed.cmd);
+    const eq = try parse(std.testing.allocator, &.{ "recurse", "push", "--color=always" });
+    try std.testing.expectEqual(style.When.always, eq.color);
+    try std.testing.expectError(error.Usage, parse(std.testing.allocator, &.{ "recurse", "--color", "sometimes" }));
+}
+
+test "usage plain text names color and keeps the command column" {
+    var buf: [1024]u8 = undefined;
+    var w = Io.Writer.fixed(&buf);
+    try writeUsage(&w, false);
+    const text = w.buffered();
+    try std.testing.expectEqualStrings(
+        \\ ▛▘█▌▛▘▌▌▛▘▛▘█▌
+        \\ ▌ ▙▖▙▖▙▌▌ ▄▌▙▖
+        \\ recurse (rc): move a superproject's gitlinks
+        \\
+        \\Usage: recurse [command] [options]
+        \\
+        \\Commands:
+        \\  status              snapshot (default)
+        \\  update [PATH]       check out recorded gitlinks and attach a branch
+        \\  commit [-m MSG]     commit nested repos, then the superproject
+        \\  pull                fast-forward the superproject, then update
+        \\  push                push nested repos, then the superproject
+        \\
+        \\Options:
+        \\  --config PATH       recurse.toml override
+        \\  --recursive / --no-recursive
+        \\  --color WHEN        auto, always, or never
+        \\  -h, --help
+        \\
+    , text);
 }

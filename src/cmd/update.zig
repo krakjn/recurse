@@ -46,7 +46,7 @@ fn updateRepo(
         // or the requested child cannot be opened.
         if (selected or (toward and s.uninitialized)) {
             const branch = git.syncSub(repo, s.name, app.arena) catch |e| git.fail(app, s.path, e);
-            try app.print("updated {s} ({s})\n", .{ s.path, branch });
+            try app.okBranch("updated", s.path, branch);
         }
 
         const descend = recursive or toward;

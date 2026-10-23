@@ -20,12 +20,12 @@ pub fn resolve(app: *App, arena: std.mem.Allocator, subs: []const git.Sub, paths
             out.append(arena, e) catch app.die("out of memory", .{});
             continue;
         }
-        if (name_count > 1) app.die("{s}: ambiguous submodule path", .{p});
+        if (name_count > 1) app.report(p, "ambiguous submodule path");
         if (name_count == 1) {
             out.append(arena, by_name.?) catch app.die("out of memory", .{});
             continue;
         }
-        app.die("{s}: unknown submodule", .{p});
+        app.report(p, "unknown submodule");
     }
     return out.toOwnedSlice(arena) catch app.die("out of memory", .{});
 }

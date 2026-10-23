@@ -1,12 +1,15 @@
 # recurse
 
-Do you have a superproject full of submodules? Do you forget to commit the gitlink, push the child first, and then get detached for the trouble? I do. `recurse` (`rc`) does that ceremony. Checkout, rebase, log, and diff stay Git.
+Do you have a superproject full of submodules? Do you forget to commit the gitlink, push the child first, and then get detached for the trouble? 
 
-`rc` with no arguments is status. `alias rc=recurse`.
+I do. 
+
+`recurse` (`rc`) does that ceremony. Checkout, rebase, log, and diff stay git.
 
 ## Day to day
 
 ```
+# rc with no arguments is `rc status`
 rc
 # edit the superproject, a nested repo, or both
 rc commit -m "fix: widget"
@@ -54,13 +57,13 @@ Push follows your commits out. Pull follows the lockfile in. A nested commit can
 | `rc push` | Nested repos that are ahead, deepest first, then the superproject. The destination is the upstream branch name (`main` tracking `upstream/trunk` lands on `trunk`). The superproject is not pushed until every affected gitlink is already on a remote, or this push just uploaded it. |
 
 ```
-.                        main         clean  a40529f
-  libs/foo               main         3395016 dirty
-  vendor/openssl         main         11aa22b pin a40529f ahead 1
+. ........................ main a40529f  clean
+  libs/foo ............... main 3395016  dirty
+  vendor/openssl ......... main 11aa22b  pin a40529f ahead 1
 ```
+
+Color follows the terminal: `--color auto` (the default), `always`, or `never`. `auto` stays plain when stdout is not a terminal or `NO_COLOR` is set. `clean` is green, `dirty` is red, `untracked` and a detached or unborn branch are yellow, the branch and `ahead` / `behind` are cyan, `pin` is magenta, and the SHA is dim.
 
 A path on `update`, `commit`, and `push` limits the walk to that submodule and its descendants. An unknown path is an error. The path in every failure is the repo that failed.
 
 Git still keeps `.gitmodules`, `branch=`, and the gitlinks.
-
-`zig build` (Zig 0.17). Binary is `zig-out/bin/recurse`.

@@ -21,6 +21,6 @@ pub fn run(app: *App, parsed: cli.Parsed, cfg: config.Config, repo: git.Repo) !v
         try git.preflightTree(app, app.arena, repo.ptr, &target, "");
         git.ffApply(repo.ptr, target) catch |e| git.fail(app, ".", e);
     }
-    try app.print("pulled .\n", .{});
+    try app.ok("pulled", ".");
     try @import("update.zig").run(app, .{ .cmd = .update, .recursive = parsed.recursive }, cfg, repo);
 }

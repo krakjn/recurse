@@ -4,6 +4,7 @@ const Io = std.Io;
 const cli = @import("cli.zig");
 const config = @import("config.zig");
 const git = @import("git.zig");
+const style = @import("style.zig");
 const App = @import("app.zig").App;
 
 const cmd_status = @import("cmd/status.zig");
@@ -35,12 +36,15 @@ pub fn main(init: std.process.Init) !void {
 
     const args = try init.minimal.args.toSlice(arena);
     const parsed = cli.parse(arena, args) catch {
-        app.stderr.writeAll(cli.usage) catch {};
+        const on = streamColor(.auto, Io.File.stderr(), io, app.environ);
+        cli.writeUsage(app.stderr, on) catch {};
         app.stderr.flush() catch {};
         std.process.exit(2);
     };
+    app.stdout_color = streamColor(parsed.color, Io.File.stdout(), io, app.environ);
+    app.stderr_color = streamColor(parsed.color, Io.File.stderr(), io, app.environ);
     if (parsed.cmd == .help) {
-        try app.stdout.writeAll(cli.usage);
+        try cli.writeUsage(app.stdout, app.stdout_color);
         return;
     }
 
@@ -64,4 +68,9 @@ pub fn main(init: std.process.Init) !void {
         .push => try cmd_push.run(&app, parsed, cfg, repo),
         .help => unreachable,
     }
+}
+
+fn streamColor(when: style.When, file: Io.File, io: Io, environ: *std.process.Environ.Map) bool {
+    const tty = file.isTty(io) catch false;
+    return style.enabled(when, tty, environ.get("NO_COLOR") != null);
 }
