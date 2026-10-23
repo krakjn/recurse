@@ -176,14 +176,20 @@ pub fn build(b: *std.Build) !void {
                     .securetransport => "-DCRYPT_COMMONCRYPTO",
                 },
             };
+            // OpenSSL and CommonCrypto define ntlm_md4_digest. mbedTLS does not,
+            // so that backend also compiles the builtin MD4. Compiling both
+            // into one archive is a duplicate symbol under Zig 0.17.
             ntlm.addCSourceFiles(.{
                 .root = libgit_root,
                 .files = switch (tls_backend) {
                     .openssl => &.{"deps/ntlmclient/crypt_openssl.c"},
-                    .mbedtls => &.{"deps/ntlmclient/crypt_mbedtls.c"},
+                    .mbedtls => &.{
+                        "deps/ntlmclient/crypt_mbedtls.c",
+                        "deps/ntlmclient/crypt_builtin_md4.c",
+                    },
                     .securetransport => &.{"deps/ntlmclient/crypt_commoncrypto.c"},
                 },
-                .flags = &ntlm_cflags,
+                .flags = &(ntlm_cflags ++ .{"-Wno-deprecated"}),
             });
             ntlm.addCSourceFiles(.{
                 .root = libgit_root,
@@ -903,9 +909,6 @@ const xdiff_sources = [_][]const u8{
     "deps/xdiff/xutils.c",
 };
 
-// Each TLS backend (openssl, mbedtls, CommonCrypto) already defines
-// ntlm_md4_digest. Zig 0.17 rejects that duplicate inside the static
-// archive, so the builtin MD4 translation unit stays out.
 const ntlm_sources = [_][]const u8{
     "deps/ntlmclient/ntlm.c",
     "deps/ntlmclient/unicode_builtin.c",

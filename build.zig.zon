@@ -32,8 +32,9 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        // Local patch of allyourcodebase/libgit2 ee14d045: drop builtin MD4
-        // so it does not collide with the TLS backend under Zig 0.17.
+        // Local patch of allyourcodebase/libgit2 ee14d045: builtin MD4 is
+        // compiled only for mbedTLS. OpenSSL and CommonCrypto already define
+        // ntlm_md4_digest, and Zig 0.17 rejects the duplicate.
         .libgit2 = .{
             .path = "deps/libgit2-zig",
         },
