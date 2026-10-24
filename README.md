@@ -1,5 +1,3 @@
-![icon](docs/recurse.jpeg)
-
 # recurse
 
 https://krakjn.github.io/recurse/
