@@ -68,15 +68,20 @@ jobs:
             tmp=$RUNNER_TEMP
           fi
           file="zig-${target}-${version}.${ext}"
-          curl -fsSL -o "$tmp/$file" "https://ziglang.org/download/${version}/${file}"
+          # Git Bash rewrites arguments that contain /download/. Leave the URL alone.
+          MSYS2_ARG_CONV_EXCL='https:' curl -fsSL -o "$tmp/$file" "https://ziglang.org/download/${version}/${file}"
           if command -v sha256sum >/dev/null 2>&1; then
             echo "${sum}  ${file}" | (cd "$tmp" && sha256sum -c -)
           else
             echo "${sum}  ${file}" | (cd "$tmp" && shasum -a 256 -c -)
           fi
-          tar -xf "$tmp/$file" -C "$tmp"
+          if [ "$ext" = zip ]; then
+            unzip -q "$tmp/$file" -d "$tmp"
+          else
+            tar -xf "$tmp/$file" -C "$tmp"
+          fi
           bindir="$tmp/zig-${target}-${version}"
-          if [ -x "$bindir/zig.exe" ]; then
+          if [ -f "$bindir/zig.exe" ]; then
             "$bindir/zig.exe" version
           else
             "$bindir/zig" version
