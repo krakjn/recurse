@@ -188,7 +188,7 @@
       box-shadow: var(--shadow);
     }
 
-    .day .cmt { color: var(--dim); }
+    .day .cmt, .install .cmt { color: var(--dim); }
 
     .note {
       max-width: 40rem;
@@ -276,9 +276,7 @@
 
     .install {
       display: grid;
-      grid-template-columns: 1.1fr 0.9fr;
-      gap: 1.5rem;
-      align-items: center;
+      gap: 1rem;
       min-width: 0;
       padding: 1.3rem 1.4rem;
       border-radius: 1.4rem;
@@ -298,8 +296,21 @@
       border-radius: 1rem;
       background: var(--purple);
       color: #fff8f0;
-      font-size: 0.95rem;
-      line-height: 1.7;
+      font-size: 0.92rem;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .assets {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem 0.9rem;
+      margin: 0.75rem 0 0.2rem;
+      padding: 0;
+      list-style: none;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 0.82rem;
     }
 
     footer {
@@ -409,12 +420,22 @@ rc push</pre>
     <section class="install">
       <div>
         <h2>Install</h2>
-        <p>Zig 0.17. The binary is <code>zig-out/bin/recurse</code>.</p>
-        <p>Tagged releases publish archives on <a href="https://github.com/krakjn/recurse/releases">GitHub</a>. Git still keeps <code>.gitmodules</code>, <code>branch=</code>, and the gitlinks.</p>
+        <p>The <a href="https://github.com/krakjn/recurse/releases/latest">latest release</a>. Linux and macOS install <code>recurse</code> to <code>~/.local/bin</code>. Windows installs <code>recurse.exe</code> to <code>%LOCALAPPDATA%\recurse\bin</code>.</p>
+        <ul class="assets">
+          <li><a href="https://github.com/krakjn/recurse/releases/latest/download/recurse-x86_64-linux.tar.gz">x86_64-linux</a></li>
+          <li><a href="https://github.com/krakjn/recurse/releases/latest/download/recurse-aarch64-linux.tar.gz">aarch64-linux</a></li>
+          <li><a href="https://github.com/krakjn/recurse/releases/latest/download/recurse-x86_64-linux-musl.tar.gz">x86_64-linux-musl</a></li>
+          <li><a href="https://github.com/krakjn/recurse/releases/latest/download/recurse-aarch64-macos.tar.gz">aarch64-macos</a></li>
+          <li><a href="https://github.com/krakjn/recurse/releases/latest/download/recurse-x86_64-macos.tar.gz">x86_64-macos</a></li>
+          <li><a href="https://github.com/krakjn/recurse/releases/latest/download/recurse-x86_64-windows.zip">x86_64-windows</a></li>
+        </ul>
+        <p>Git still keeps <code>.gitmodules</code>, <code>branch=</code>, and the gitlinks.</p>
       </div>
-      <pre>git clone https://github.com/krakjn/recurse
-cd recurse
-zig build</pre>
+      <pre><span class="cmt"># linux and macos</span>
+curl -fsSL https://krakjn.github.io/recurse/install.sh | sh
+
+<span class="cmt"># windows</span>
+irm https://krakjn.github.io/recurse/install.ps1 | iex</pre>
     </section>
 
     <footer>
