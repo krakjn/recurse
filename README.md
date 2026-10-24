@@ -1,4 +1,8 @@
+![icon](docs/recurse.jpeg)
+
 # recurse
+
+https://krakjn.github.io/recurse/
 
 Do you have a superproject full of submodules? Do you forget to commit the gitlink, push the child first, and then get detached for the trouble? 
 

@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>recurse — move a superproject's gitlinks</title>
+  <meta name="description" content="recurse (rc) commits, pushes, and pulls a superproject and its nested repos in the right order. Checkout, rebase, log, and diff stay git.">
+  <meta name="theme-color" content="#fff4e6">
+  <link rel="icon" href="./recurse.jpeg">
+  <link rel="apple-touch-icon" href="./recurse.jpeg">
+  <meta property="og:title" content="recurse">
+  <meta property="og:description" content="Move a superproject's gitlinks. Commit the child, push the child, then the superproject.">
+  <meta property="og:image" content="https://krakjn.github.io/recurse/recurse.jpeg">
+  <meta property="og:url" content="https://krakjn.github.io/recurse/">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,680&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --cream: #fff4e6;
+      --paper: #fffaf3;
+      --ink: #2a1548;
+      --ink-soft: #5c4a78;
+      --line: #eadcc8;
+      --teal: #14b8a8;
+      --teal-deep: #0f766e;
+      --gold: #f0b429;
+      --coral: #ff6f61;
+      --purple: #2a1548;
+      --ok: #3dd68c;
+      --bad: #ff6b6b;
+      --pin: #e879f9;
+      --ahead: #67e8f9;
+      --dim: #a898c4;
+      --shadow: 0 18px 40px rgb(42 21 72 / 10%);
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 8%, rgb(20 184 168 / 16%), transparent 28%),
+        radial-gradient(circle at 88% 0%, rgb(240 180 41 / 22%), transparent 26%),
+        radial-gradient(circle at 90% 80%, rgb(255 111 97 / 14%), transparent 24%),
+        var(--cream);
+      font-family: "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+      font-size: 1.125rem;
+      line-height: 1.55;
+    }
+
+    a { color: var(--teal-deep); }
+
+    a:hover { color: var(--ink); }
+
+    code, .mono, pre {
+      font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    pre {
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    .wrap {
+      width: min(1080px, calc(100% - 2.5rem));
+      margin: 0 auto;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(180px, 280px) 1fr;
+      gap: 2.5rem;
+      align-items: center;
+      padding: 4.5rem 0 3rem;
+    }
+
+    .mark-wrap {
+      position: relative;
+      justify-self: center;
+    }
+
+    .mark {
+      display: block;
+      width: min(280px, 70vw);
+      height: auto;
+      border-radius: 2rem;
+      background: #fff8f0;
+      box-shadow: var(--shadow);
+    }
+
+    .spark {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      background: var(--gold);
+      clip-path: polygon(50% 0, 62% 38%, 100% 50%, 62% 62%, 50% 100%, 38% 62%, 0 50%, 38% 38%);
+    }
+
+    .spark.a { top: 8%; left: -4%; background: var(--gold); }
+    .spark.b { bottom: 18%; left: -6%; background: var(--teal); width: 10px; height: 10px; }
+    .spark.c { top: 22%; right: -2%; background: var(--coral); width: 11px; height: 11px; }
+    .spark.d { bottom: 8%; right: 6%; background: var(--teal); }
+
+    h1 {
+      margin: 0;
+      font-family: Fraunces, Georgia, serif;
+      font-size: clamp(3.4rem, 8vw, 6.4rem);
+      font-weight: 680;
+      letter-spacing: -0.045em;
+      line-height: 0.9;
+    }
+
+    .lede {
+      max-width: 36rem;
+      margin: 1rem 0 0;
+      font-size: 1.35rem;
+      line-height: 1.4;
+    }
+
+    .alias {
+      display: inline-block;
+      margin: 1.25rem 0 0;
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      background: var(--paper);
+      box-shadow: inset 0 0 0 1px var(--line);
+      font-size: 0.95rem;
+    }
+
+    section { padding: 1.25rem 0 2rem; }
+
+    h2 {
+      margin: 0 0 0.75rem;
+      font-family: Fraunces, Georgia, serif;
+      font-size: clamp(1.8rem, 3vw, 2.4rem);
+      font-weight: 560;
+      letter-spacing: -0.03em;
+    }
+
+    .beat {
+      max-width: 40rem;
+      margin: 0;
+      color: var(--ink);
+    }
+
+    .lanes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+      margin-top: 1.25rem;
+    }
+
+    .lane {
+      padding: 1.1rem 1.2rem 1.2rem;
+      border-radius: 1.2rem;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .lane h3 {
+      margin: 0;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .lane p {
+      margin: 0.4rem 0 0;
+      color: var(--ink-soft);
+    }
+
+    .lane.out { box-shadow: var(--shadow), inset 4px 0 0 var(--coral); }
+    .lane.in { box-shadow: var(--shadow), inset 4px 0 0 var(--teal); }
+
+    .day {
+      margin: 0;
+      padding: 1.15rem 1.25rem;
+      overflow-x: auto;
+      border-radius: 1.2rem;
+      background: var(--purple);
+      color: #fff8f0;
+      font-size: 0.95rem;
+      line-height: 1.7;
+      box-shadow: var(--shadow);
+    }
+
+    .day .cmt { color: var(--dim); }
+
+    .note {
+      max-width: 40rem;
+      margin: 0.9rem 0 0;
+      color: var(--ink-soft);
+    }
+
+    .term {
+      overflow: hidden;
+      border-radius: 1.25rem;
+      background: var(--purple);
+      box-shadow: var(--shadow);
+    }
+
+    .term-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.7rem 0.9rem;
+      background: #3a2260;
+    }
+
+    .dot {
+      width: 0.7rem;
+      height: 0.7rem;
+      border-radius: 50%;
+    }
+
+    .dot.teal { background: var(--teal); }
+    .dot.gold { background: var(--gold); }
+    .dot.coral { background: var(--coral); }
+
+    .term-bar code {
+      margin-left: 0.4rem;
+      color: #fff4e6;
+      font-size: 0.85rem;
+    }
+
+    .tree {
+      margin: 0;
+      padding: 1rem 1.15rem 1.25rem;
+      overflow-x: auto;
+      color: #fff8f0;
+      font-size: 0.92rem;
+      line-height: 1.75;
+    }
+
+    .sha, .dots { color: var(--dim); }
+    .branch { color: var(--ahead); font-weight: 600; }
+    .ok { color: var(--ok); font-weight: 600; }
+    .bad { color: var(--bad); font-weight: 600; }
+    .pin { color: var(--pin); }
+    .ahead { color: var(--ahead); font-weight: 600; }
+
+    .commands {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+      gap: 0.9rem;
+    }
+
+    .card {
+      padding: 1rem 1rem 1.1rem;
+      border-radius: 1.1rem;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .card h3 {
+      margin: 0;
+      font-family: "IBM Plex Mono", ui-monospace, monospace;
+      font-size: 1rem;
+    }
+
+    .card p {
+      margin: 0.45rem 0 0;
+      color: var(--ink-soft);
+      font-size: 1rem;
+    }
+
+    .card.status { box-shadow: var(--shadow), inset 0 5px 0 var(--teal); }
+    .card.update { box-shadow: var(--shadow), inset 0 5px 0 var(--gold); }
+    .card.commit { box-shadow: var(--shadow), inset 0 5px 0 var(--coral); }
+    .card.pull { box-shadow: var(--shadow), inset 0 5px 0 var(--teal); }
+    .card.push { box-shadow: var(--shadow), inset 0 5px 0 var(--gold); }
+
+    .install {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 1.5rem;
+      align-items: center;
+      min-width: 0;
+      padding: 1.3rem 1.4rem;
+      border-radius: 1.4rem;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .install > * { min-width: 0; }
+
+    .install h2 { margin-bottom: 0.4rem; }
+
+    .install p { margin: 0.4rem 0; }
+
+    .install pre {
+      margin: 0;
+      padding: 1rem 1.1rem;
+      border-radius: 1rem;
+      background: var(--purple);
+      color: #fff8f0;
+      font-size: 0.95rem;
+      line-height: 1.7;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1rem 0 3rem;
+      color: var(--ink-soft);
+      font-size: 0.95rem;
+    }
+
+    @media (max-width: 800px) {
+      .hero, .lanes, .install, footer {
+        grid-template-columns: 1fr;
+        display: grid;
+      }
+
+      .hero { padding-top: 2.2rem; gap: 1.2rem; }
+      footer { justify-items: start; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header class="hero">
+      <div class="mark-wrap">
+        <span class="spark a" aria-hidden="true"></span>
+        <span class="spark b" aria-hidden="true"></span>
+        <span class="spark c" aria-hidden="true"></span>
+        <span class="spark d" aria-hidden="true"></span>
+        <img class="mark" src="./recurse.jpeg" width="1254" height="1254" alt="Three nested folders. The front one is smiling.">
+      </div>
+      <div>
+        <h1>recurse</h1>
+        <p class="lede">Move a superproject's gitlinks. Checkout, rebase, log, and diff stay git.</p>
+        <p class="alias"><code>alias rc=recurse</code></p>
+      </div>
+    </header>
+
+    <section>
+      <h2>Children first</h2>
+      <p class="beat">Commit the child, push the child, then the superproject. Push the superproject first and the clone asks for a SHA nobody uploaded.</p>
+      <div class="lanes">
+        <article class="lane out">
+          <h3>rc push</h3>
+          <p>Nested repos, deepest first, then the superproject. The superproject stays local until every gitlink it records is already on a remote.</p>
+        </article>
+        <article class="lane in">
+          <h3>rc pull</h3>
+          <p>Fast-forward the superproject, then check out the recorded gitlinks. Pull follows the lockfile in.</p>
+        </article>
+      </div>
+    </section>
+
+    <section>
+      <h2>Day to day</h2>
+      <pre class="day"><span class="cmt"># rc with no arguments is rc status</span>
+rc
+<span class="cmt"># edit the superproject, a nested repo, or both</span>
+rc commit -m "fix: widget"
+rc push</pre>
+      <p class="note">On the other machine, <code>rc pull</code>. After <code>git checkout</code> of another superproject commit, <code>rc update</code> checks out those gitlinks and leaves HEAD on a branch. To take a submodule's upstream, <code>git pull</code> in that repo, then <code>rc commit</code>.</p>
+    </section>
+
+    <section>
+      <h2>The whole tree</h2>
+      <div class="term">
+        <div class="term-bar">
+          <span class="dot teal"></span>
+          <span class="dot gold"></span>
+          <span class="dot coral"></span>
+          <code>rc</code>
+        </div>
+        <pre class="tree">. <span class="dots">........................</span> <span class="branch">main</span> <span class="sha">a40529f</span>  <span class="ok">clean</span>
+  libs/foo <span class="dots">...............</span> <span class="branch">main</span> <span class="sha">3395016</span>  <span class="bad">dirty</span>
+  vendor/openssl <span class="dots">.........</span> <span class="branch">main</span> <span class="sha">11aa22b</span>  <span class="pin">pin a40529f</span> <span class="ahead">ahead 1</span></pre>
+      </div>
+      <p class="note"><code>clean</code> is green, <code>dirty</code> is red, <code>pin</code> is magenta, and the branch, <code>ahead</code>, and <code>behind</code> are cyan. The SHA is dim. <code>--color auto</code> is the default. <code>NO_COLOR</code> turns it off.</p>
+    </section>
+
+    <section>
+      <h2>Commands</h2>
+      <div class="commands">
+        <article class="card status">
+          <h3>rc status</h3>
+          <p>The whole tree. No fetch. Branch or detached, dirty, untracked, the checkout SHA, and <code>pin</code> when that checkout is not the recorded gitlink.</p>
+        </article>
+        <article class="card update">
+          <h3>rc update</h3>
+          <p>Check out each recorded gitlink and attach a branch. Fast-forward when the pin is ahead. Refuse when the branch is ahead, the histories diverged, or the only option is detached.</p>
+        </article>
+        <article class="card commit">
+          <h3>rc commit</h3>
+          <p>One message, deepest dirty repo first, then the superproject. A stop names the repo and says the superproject was not updated.</p>
+        </article>
+        <article class="card pull">
+          <h3>rc pull</h3>
+          <p>Fast-forward the superproject from the current branch's upstream, then update. No path. <code>pull.ff</code> other than <code>only</code> is rejected.</p>
+        </article>
+        <article class="card push">
+          <h3>rc push</h3>
+          <p>Nested repos that are ahead, deepest first, then the superproject. The destination is the upstream branch name.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="install">
+      <div>
+        <h2>Install</h2>
+        <p>Zig 0.17. The binary is <code>zig-out/bin/recurse</code>.</p>
+        <p>Tagged releases publish archives on <a href="https://github.com/krakjn/recurse/releases">GitHub</a>. Git still keeps <code>.gitmodules</code>, <code>branch=</code>, and the gitlinks.</p>
+      </div>
+      <pre>git clone https://github.com/krakjn/recurse
+cd recurse
+zig build</pre>
+    </section>
+
+    <footer>
+      <a href="https://github.com/krakjn/recurse">github.com/krakjn/recurse</a>
+      <span>rc</span>
+    </footer>
+  </div>
+</body>
+</html>
